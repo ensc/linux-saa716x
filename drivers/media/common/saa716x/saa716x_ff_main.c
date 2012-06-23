@@ -3,6 +3,7 @@
 #include <linux/kernel.h>
 #include <linux/pci.h>
 #include <linux/mutex.h>
+#include <linux/version.h>
 
 #include <asm/io.h>
 #include <asm/pgtable.h>
