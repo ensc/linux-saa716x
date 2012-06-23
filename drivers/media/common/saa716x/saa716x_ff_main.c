@@ -1517,12 +1517,12 @@ static struct pci_driver saa716x_ff_pci_driver = {
 	.remove			= saa716x_ff_pci_remove,
 };
 
-static int __devinit saa716x_ff_init(void)
+static int __init saa716x_ff_init(void)
 {
 	return pci_register_driver(&saa716x_ff_pci_driver);
 }
 
-static void __devexit saa716x_ff_exit(void)
+static void __exit saa716x_ff_exit(void)
 {
 	return pci_unregister_driver(&saa716x_ff_pci_driver);
 }
