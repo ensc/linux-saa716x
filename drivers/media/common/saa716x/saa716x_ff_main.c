@@ -141,6 +141,7 @@ static int saa716x_ff_fpga_init(struct saa716x_dev *saa716x)
 
 	return 0;
 }
+MODULE_FIRMWARE("dvb-ttpremium-fpga-01.fw");
 
 static int saa716x_ff_st7109_init(struct saa716x_dev *saa716x)
 {
@@ -263,6 +264,8 @@ static int saa716x_ff_st7109_init(struct saa716x_dev *saa716x)
 
 	return 0;
 }
+MODULE_FIRMWARE("dvb-ttpremium-loader-01.fw");
+MODULE_FIRMWARE("dvb-ttpremium-st7109-01.fw");
 
 static int saa716x_usercopy(struct dvb_device *dvbdev,
 			    unsigned int cmd, unsigned long arg,
