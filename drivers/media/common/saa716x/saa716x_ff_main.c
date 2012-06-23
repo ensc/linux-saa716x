@@ -1810,13 +1810,26 @@ static struct pci_driver saa716x_ff_pci_driver = {
 	.remove			= saa716x_ff_pci_remove,
 };
 
+static void _saa716x_ff_init(struct work_struct *work)
+{
+	int	rc;
+
+	rc = pci_register_driver(&saa716x_ff_pci_driver);
+	if (rc)
+		printk(KERN_ERR "%s: failed to register driver: %d\n",
+		       __func__, rc);
+}
+
+static DECLARE_WORK(saa716x_ff_driver_work, _saa716x_ff_init);
+
 static int __init saa716x_ff_init(void)
 {
-	return pci_register_driver(&saa716x_ff_pci_driver);
+	return schedule_work(&saa716x_ff_driver_work);
 }
 
 static void __exit saa716x_ff_exit(void)
 {
+	cancel_work_sync(&saa716x_ff_driver_work);
 	return pci_unregister_driver(&saa716x_ff_pci_driver);
 }
 
