@@ -1144,17 +1144,16 @@ static int saa716x_ff_pci_probe(struct pci_dev *pdev, const struct pci_device_id
 
 	/* wait a maximum of 10 seconds for the STi7109 to boot */
 	timeout = 10 * HZ;
-	timeout = wait_event_interruptible_timeout(sti7109->boot_finish_wq,
-						   sti7109->boot_finished == 1,
-						   timeout);
+	err = wait_event_interruptible_timeout(sti7109->boot_finish_wq,
+					       sti7109->boot_finished == 1,
+					       timeout);
 
-	if (timeout == -ERESTARTSYS || sti7109->boot_finished == 0) {
-		if (timeout == -ERESTARTSYS) {
-			/* a signal arrived */
-			goto fail6;
+	if (err == -ERESTARTSYS || sti7109->boot_finished == 0) {
+		/* return ETIMEDOUT only, when not interrupted by a signal */
+		if (err != -ERESTARTSYS) {
+			dprintk(SAA716x_ERROR, 1, "timed out waiting for boot finish");
+			err = -ETIMEDOUT;
 		}
-		dprintk(SAA716x_ERROR, 1, "timed out waiting for boot finish");
-		err = -ETIMEDOUT;
 		goto fail6;
 	}
 	dprintk(SAA716x_INFO, 1, "STi7109 finished booting");
