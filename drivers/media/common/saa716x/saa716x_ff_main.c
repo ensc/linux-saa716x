@@ -196,7 +196,7 @@ static int saa716x_ff_st7109_init(struct saa716x_dev *saa716x)
 
 	if (waitTime >= 1 * HZ) {
 		dprintk(SAA716x_ERROR, 1, "STi7109 seems to be DEAD!");
-		return -1;
+		return -EIO;
 	}
 	dprintk(SAA716x_INFO, 1, "STi7109 ready after %llu ticks", waitTime);
 
@@ -245,7 +245,7 @@ static int saa716x_ff_st7109_init(struct saa716x_dev *saa716x)
 		if (waitTime >= 1 * HZ) {
 			dprintk(SAA716x_ERROR, 1, "STi7109 seems to be DEAD!");
 			release_firmware(fw);
-			return -1;
+			return -EIO;
 		}
 	}
 
@@ -1154,7 +1154,7 @@ static int saa716x_ff_pci_probe(struct pci_dev *pdev, const struct pci_device_id
 			goto fail6;
 		}
 		dprintk(SAA716x_ERROR, 1, "timed out waiting for boot finish");
-		err = -1;
+		err = -ETIMEDOUT;
 		goto fail6;
 	}
 	dprintk(SAA716x_INFO, 1, "STi7109 finished booting");
