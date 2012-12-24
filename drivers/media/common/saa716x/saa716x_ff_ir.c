@@ -29,9 +29,13 @@
 #include "saa716x_ff.h"
 
 
+struct ir_keymap {
+	u16			keys[128];
+};
+
 /* infrared remote control */
 struct infrared {
-	u16			key_map[128];
+	struct ir_keymap	*key_maps[33];
 	struct input_dev	*input_dev;
 	char			input_phys[32];
 	struct timer_list	keyup_timer;
@@ -60,6 +64,28 @@ static void ir_emit_keyup(unsigned long parm)
 	input_sync(ir->input_dev);
 }
 
+static int ir_scancode_to_keycode(struct infrared *ir, unsigned int scancode)
+{
+	unsigned int		addr = scancode >> 16;
+	unsigned int		data = scancode & 0xffff;
+	struct ir_keymap const	*map;
+
+	if (addr >= ARRAY_SIZE(ir->key_maps))
+		return -EINVAL;
+
+	if (!(ir->device_mask & (1 << addr)))
+		return 0;
+
+	map = ir->key_maps[addr];
+
+	if (data >= ARRAY_SIZE(map->keys))
+		return -EINVAL;
+
+	if (map == NULL)
+		return 0;
+
+	return map->keys[data];
+}
 
 /* tasklet */
 static void ir_emit_key(unsigned long parm)
@@ -71,6 +97,8 @@ static void ir_emit_key(unsigned long parm)
 	u8 addr;
 	u16 toggle;
 	u16 keycode;
+	u32 scancode;
+	bool send_scancode;
 
 	/* extract device address and data */
 	if (ircom & 0x80000000) { /* CEC remote command */
@@ -96,56 +124,117 @@ static void ir_emit_key(unsigned long parm)
 		}
 	}
 
-	input_event(ir->input_dev, EV_MSC, MSC_RAW, (addr << 16) | data);
-	input_event(ir->input_dev, EV_MSC, MSC_SCAN, data);
-
-	keycode = ir->key_map[data];
+	scancode = (addr << 16) | data;
+	keycode = ir_scancode_to_keycode(ir, scancode);
 
 	dprintk(SAA716x_DEBUG, 0,
 		"%s: code %08x -> addr %i data 0x%02x -> keycode %i\n",
 		__func__, ircom, addr, data, keycode);
 
 	/* check device address */
-	if (!(ir->device_mask & (1 << addr)))
-		return;
-
-	if (!keycode) {
-		printk(KERN_WARNING "%s: code %08x -> addr %i data 0x%02x -> unknown key!\n",
-			__func__, ircom, addr, data);
-		return;
-	}
-
-	if (timer_pending(&ir->keyup_timer)) {
-		del_timer(&ir->keyup_timer);
-		if (ir->last_key != keycode || toggle != ir->last_toggle) {
-			ir->delay_timer_finished = false;
-			input_event(ir->input_dev, EV_KEY, ir->last_key, 0);
-			input_event(ir->input_dev, EV_KEY, keycode, 1);
-			input_sync(ir->input_dev);
-		} else if (ir->delay_timer_finished) {
-			input_event(ir->input_dev, EV_KEY, keycode, 2);
-			input_sync(ir->input_dev);
-		}
-	} else {
+	send_scancode = true;
+	if (del_timer(&ir->keyup_timer) == 0) {
+		/* no timer active yet; reset variables */
 		ir->delay_timer_finished = false;
-		input_event(ir->input_dev, EV_KEY, keycode, 1);
-		input_sync(ir->input_dev);
+	} else if (ir->last_key != keycode || toggle != ir->last_toggle) {
+		/* another key was pressed; signal the release event of the
+		 * previos one */
+		ir->delay_timer_finished = false;
+		input_event(ir->input_dev, EV_KEY, ir->last_key, 0);
+	} else if (ir->delay_timer_finished) {
+		/* repeat last key event */
+		input_event(ir->input_dev, EV_KEY, keycode, 2);
+		send_scancode = false;
+	} else {
+		/* repeat timer is still running; do nothing */
+		return;
 	}
 
-	ir->last_key = keycode;
-	ir->last_toggle = toggle;
+	if (send_scancode) {
+		input_event(ir->input_dev, EV_MSC, MSC_RAW,  ircom);
+		input_event(ir->input_dev, EV_MSC, MSC_SCAN, scancode);
 
-	ir->keyup_timer.expires = jiffies + UP_TIMEOUT;
-	add_timer(&ir->keyup_timer);
+		if (keycode > 0)
+			input_event(ir->input_dev, EV_KEY, keycode, 1);
+		else
+			dev_info(&ir->input_dev->dev,
+				 "unknown key %04x (scancode %08x)\n",
+				 ircom, scancode);
+	}
 
+	input_sync(ir->input_dev);
+
+	if (keycode > 0) {
+		ir->last_key = keycode;
+		ir->last_toggle = toggle;
+
+		ir->keyup_timer.expires = jiffies + UP_TIMEOUT;
+		add_timer(&ir->keyup_timer);
+	}
 }
 
+static unsigned int ir_ke_scancode(struct input_keymap_entry const *ke)
+{
+	unsigned int	v = 0;
+
+	memcpy(&v, &ke->scancode, sizeof v);
+	return v;
+}
+
+static int ir_setkeycode(struct input_dev *dev,
+			 const struct input_keymap_entry *ke,
+			 unsigned int *old_keycode)
+{
+	struct infrared		*ir = input_get_drvdata(dev);
+	unsigned int		scancode = ir_ke_scancode(ke);
+	unsigned int		addr = scancode >> 16;
+	unsigned int		data = scancode & 0xffff;
+	struct ir_keymap	*map;
+	unsigned int		old_code;
+
+	if (addr >= ARRAY_SIZE(ir->key_maps))
+		return -EINVAL;
+
+	map = ir->key_maps[addr];
+
+	if (data >= ARRAY_SIZE(map->keys))
+		return -EINVAL;
+
+	if (map == NULL) {
+		/* we have to use GFP_ATOMIC here because setkeycode is called
+		 * with a hold spinlock */
+		map = devm_kzalloc(&dev->dev, sizeof *map, GFP_ATOMIC);
+		ir->key_maps[addr] = map;
+	}
+
+	if (!map)
+		return -ENOMEM;
+
+	old_code = map->keys[data];
+
+	if (old_keycode)
+		*old_keycode = old_code;
+
+	map->keys[data] = ke->keycode;
+
+	__clear_bit(old_code, dev->keybit);
+	__set_bit(ke->keycode, dev->keybit);
+
+	return 0;
+}
+
+static int ir_getkeycode(struct input_dev *dev,
+			 struct input_keymap_entry *ke)
+{
+	struct infrared		*ir = input_get_drvdata(dev);
+	unsigned int		scancode = ir_ke_scancode(ke);
+
+	return ir_scancode_to_keycode(ir, scancode);
+}
 
 /* register with input layer */
 static void ir_register_keys(struct infrared *ir)
 {
-	int i;
-
 	set_bit(EV_KEY, ir->input_dev->evbit);
 	set_bit(EV_REP, ir->input_dev->evbit);
 	set_bit(EV_MSC, ir->input_dev->evbit);
@@ -155,16 +244,8 @@ static void ir_register_keys(struct infrared *ir)
 
 	memset(ir->input_dev->keybit, 0, sizeof(ir->input_dev->keybit));
 
-	for (i = 0; i < ARRAY_SIZE(ir->key_map); i++) {
-		if (ir->key_map[i] > KEY_MAX)
-			ir->key_map[i] = 0;
-		else if (ir->key_map[i] > KEY_RESERVED)
-			set_bit(ir->key_map[i], ir->input_dev->keybit);
-	}
-
-	ir->input_dev->keycode = ir->key_map;
-	ir->input_dev->keycodesize = sizeof(ir->key_map[0]);
-	ir->input_dev->keycodemax = ARRAY_SIZE(ir->key_map);
+	ir->input_dev->setkeycode = ir_setkeycode;
+	ir->input_dev->getkeycode = ir_getkeycode;
 }
 
 
@@ -195,7 +276,6 @@ int saa716x_ir_init(struct saa716x_dev *saa716x)
 	struct input_dev *input_dev;
 	struct infrared *ir;
 	int rc;
-	int i;
 
 	if (!saa716x)
 		return -ENOMEM;
@@ -226,6 +306,7 @@ int saa716x_ir_init(struct saa716x_dev *saa716x)
 #else
 	input_dev->cdev.dev = &saa716x->pdev->dev;
 #endif
+	input_set_drvdata(input_dev, ir);
 	rc = input_register_device(input_dev);
 	if (rc)
 		goto err;
@@ -233,8 +314,6 @@ int saa716x_ir_init(struct saa716x_dev *saa716x)
 	/* TODO: fix setup/keymap */
 	ir->protocol = IR_RC5;
 	ir->device_mask = 0xffffffff;
-	for (i = 0; i < ARRAY_SIZE(ir->key_map); i++)
-		ir->key_map[i] = i+1;
 	ir_register_keys(ir);
 
 	/* override repeat timer */
