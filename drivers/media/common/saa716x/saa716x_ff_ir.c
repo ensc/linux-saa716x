@@ -28,9 +28,13 @@
 #include "saa716x_ff.h"
 
 
+struct ir_keymap {
+	u16			keys[128];
+};
+
 /* infrared remote control */
 struct infrared {
-	u16			key_map[128];
+	struct ir_keymap	*key_maps[33];
 	struct input_dev	*input_dev;
 	char			input_phys[32];
 	struct timer_list	keyup_timer;
@@ -59,6 +63,105 @@ static void ir_emit_keyup(unsigned long parm)
 	input_sync(ir->input_dev);
 }
 
+static unsigned int ir_keymap_calculate_index(struct ir_keymap /*const*/ *maps[],
+					      size_t addr, size_t data)
+{
+	unsigned int	res = 0;
+	size_t		i;
+
+	BUG_ON(data >= ARRAY_SIZE(maps[0]->keys));
+	BUG_ON(maps[addr] == NULL);
+
+	for (i = 0; i+1 < addr; ++i) {
+		size_t		j;
+
+		if (maps[i] == NULL)
+			continue;
+
+		for (j = 0; j < ARRAY_SIZE(maps[i]->keys); ++j) {
+			if (maps[i]->keys[j] != 0)
+				++res;
+		}
+	}
+
+	for (i = 0; i <= data; ++i) {
+		if (maps[addr]->keys[i] != 0 || i == data)
+			++res;
+	}
+
+	return res;
+}
+
+static int ir_keymap_find_by_index(struct ir_keymap /*const*/ *maps[],
+				   size_t num_maps, unsigned int idx,
+				   size_t *addr, size_t *data)
+{
+	size_t		i;
+
+	++idx;
+	for (i = 0; i < num_maps && idx > 0; ++i) {
+		size_t	j;
+
+		if (maps[i] == NULL)
+			continue;
+
+		for (j = 0; j < ARRAY_SIZE(maps[i]->keys) && idx > 0; ++j) {
+			if (maps[i]->keys[j] != 0)
+				--idx;
+		}
+
+		if (idx == 0) {
+			*addr = i;
+			*data = j;
+			break;
+		}
+	}
+
+	return (idx == 0) ? 0 : -ENOENT;
+}
+
+
+static int ir_scancode_to_keycode(struct infrared *ir, unsigned int scancode,
+				  struct input_keymap_entry *ke)
+{
+	unsigned int		addr = scancode >> 16;
+	unsigned int		data = scancode & 0xffff;
+	struct ir_keymap const	*map;
+
+	if (addr >= ARRAY_SIZE(ir->key_maps)) {
+		dev_warn(&ir->input_dev->dev,
+			 "address in scancode %08x out of range\n", scancode);
+		return -EINVAL;
+	}
+
+	if (!(ir->device_mask & (1 << addr)))
+		return 0;
+
+	map = ir->key_maps[addr];
+
+	if (data >= ARRAY_SIZE(map->keys)) {
+		dev_warn(&ir->input_dev->dev,
+			 "data in scancode %08x out of range\n", scancode);
+		return -EINVAL;
+	}
+
+	if (map == NULL) {
+		dev_warn(&ir->input_dev->dev,
+			 "no keymap for scancode %08x\n", scancode);
+		return 0;
+	}
+
+	dev_dbg(&ir->input_dev->dev, "map[%u]->keys[%u] => %04x\n",
+		addr, data, map->keys[data]);
+
+	if (ke) {
+		ke->keycode = map->keys[data];
+		ke->len = sizeof scancode;
+		ke->index = ir_keymap_calculate_index(ir->key_maps, addr, data);
+	}
+
+	return map->keys[data];
+}
 
 /* tasklet */
 static void ir_emit_key(unsigned long parm)
@@ -70,6 +173,8 @@ static void ir_emit_key(unsigned long parm)
 	u8 addr;
 	u16 toggle;
 	u16 keycode;
+	u32 scancode;
+	bool send_scancode;
 
 	/* extract device address and data */
 	if (ircom & 0x80000000) { /* CEC remote command */
@@ -95,56 +200,169 @@ static void ir_emit_key(unsigned long parm)
 		}
 	}
 
-	input_event(ir->input_dev, EV_MSC, MSC_RAW, (addr << 16) | data);
-	input_event(ir->input_dev, EV_MSC, MSC_SCAN, data);
-
-	keycode = ir->key_map[data];
+	scancode = (addr << 16) | data;
+	keycode = ir_scancode_to_keycode(ir, scancode, NULL);
 
 	dprintk(SAA716x_DEBUG, 0,
 		"%s: code %08x -> addr %i data 0x%02x -> keycode %i\n",
 		__func__, ircom, addr, data, keycode);
 
-	/* check device address */
-	if (!(ir->device_mask & (1 << addr)))
-		return;
-
-	if (!keycode) {
-		printk(KERN_WARNING "%s: code %08x -> addr %i data 0x%02x -> unknown key!\n",
-			__func__, ircom, addr, data);
-		return;
-	}
-
-	if (timer_pending(&ir->keyup_timer)) {
-		del_timer(&ir->keyup_timer);
-		if (ir->last_key != keycode || toggle != ir->last_toggle) {
-			ir->delay_timer_finished = false;
-			input_event(ir->input_dev, EV_KEY, ir->last_key, 0);
-			input_event(ir->input_dev, EV_KEY, keycode, 1);
-			input_sync(ir->input_dev);
-		} else if (ir->delay_timer_finished) {
-			input_event(ir->input_dev, EV_KEY, keycode, 2);
-			input_sync(ir->input_dev);
-		}
+	send_scancode = true;
+	/* \todo: there is a race with the 'ir->delay_timer_finished' flag;
+	 * when the repeat timer is running and this interrupt routine is
+	 * called, the flag is reset by this function but set immediately by
+	 * the timer causing a too fast repeat event */
+	if (del_timer(&ir->keyup_timer) == 0) {
+		/* no timer active yet (e.g. not previously pressed key which
+		 * must be handled by sending a release or repeat event; just
+		 * reset variables */
+	} else if (ir->last_key != keycode || toggle != ir->last_toggle) {
+		/* another key was pressed; signal the release event of the
+		 * previos one */
+		input_event(ir->input_dev, EV_KEY, ir->last_key, 0);
+	} else if (ir->delay_timer_finished) {
+		/* repeat last key event */
+		input_event(ir->input_dev, EV_KEY, keycode, 2);
+		send_scancode = false;
 	} else {
-		ir->delay_timer_finished = false;
-		input_event(ir->input_dev, EV_KEY, keycode, 1);
-		input_sync(ir->input_dev);
+		/* repeat timer was running but no action was required; do
+		 * nothing */
+		send_scancode = false;
 	}
 
-	ir->last_key = keycode;
-	ir->last_toggle = toggle;
+	if (send_scancode) {
+		input_event(ir->input_dev, EV_MSC, MSC_RAW,  ircom);
+		input_event(ir->input_dev, EV_MSC, MSC_SCAN, scancode);
 
-	ir->keyup_timer.expires = jiffies + UP_TIMEOUT;
-	add_timer(&ir->keyup_timer);
+		if (keycode > 0) {
+			ir->delay_timer_finished = false;
+			input_event(ir->input_dev, EV_KEY, keycode, 1);
+		} else {
+			dev_info(&ir->input_dev->dev,
+				 "unknown key %04x (scancode %08x)\n",
+				 ircom, scancode);
+		}
+	}
 
+	input_sync(ir->input_dev);
+
+	if (keycode > 0) {
+		ir->last_key = keycode;
+		ir->last_toggle = toggle;
+
+		ir->keyup_timer.expires = jiffies + UP_TIMEOUT;
+		add_timer(&ir->keyup_timer);
+	}
 }
 
+static unsigned int ir_ke_scancode(struct input_keymap_entry const *ke)
+{
+	unsigned int	v = 0;
+
+	if (ke->len != sizeof v) {
+		printk(KERN_WARNING "%s: bad length %u of scancode\n",
+		       __func__, ke->len);
+		return ~0u;
+	}
+
+	memcpy(&v, &ke->scancode, sizeof v);
+	return v;
+}
+
+static int ir_setkeycode(struct input_dev *dev,
+			 const struct input_keymap_entry *ke,
+			 unsigned int *old_keycode)
+{
+	struct infrared		*ir = input_get_drvdata(dev);
+	unsigned int		scancode = ir_ke_scancode(ke);
+	unsigned int		addr = scancode >> 16;
+	unsigned int		data = scancode & 0xffff;
+	struct ir_keymap	*map;
+	unsigned int		old_code;
+
+	if (ke->flags & INPUT_KEYMAP_BY_INDEX) {
+		dev_warn(&ir->input_dev->dev,
+			 "setkeycode by index not supported\n");
+		return -EINVAL;
+	}
+
+	if (addr >= ARRAY_SIZE(ir->key_maps)) {
+		dev_warn(&ir->input_dev->dev,
+			 "address in scancode %08x out of range\n", scancode);
+		return -EINVAL;
+	}
+
+	map = ir->key_maps[addr];
+
+	if (data >= ARRAY_SIZE(map->keys)) {
+		dev_warn(&ir->input_dev->dev,
+			 "data in scancode %08x out of range\n", scancode);
+		return -EINVAL;
+	}
+
+	if (map == NULL) {
+		dev_dbg(&ir->input_dev->dev,
+			"allocating map for scancode %08x\n", scancode);
+
+		/* we have to use GFP_ATOMIC here because setkeycode is called
+		 * with a hold spinlock */
+		map = devm_kzalloc(&dev->dev, sizeof *map, GFP_ATOMIC);
+		ir->key_maps[addr] = map;
+	}
+
+	if (!map)
+		return -ENOMEM;
+
+	old_code = map->keys[data];
+
+	if (old_keycode)
+		*old_keycode = old_code;
+
+	dev_dbg(&ir->input_dev->dev, "map[%u]->keys[%u] <= %04x\n",
+		addr, data, ke->keycode);
+
+	map->keys[data] = ke->keycode;
+
+	__clear_bit(old_code, dev->keybit);
+	__set_bit(ke->keycode, dev->keybit);
+
+	return 0;
+}
+
+static int ir_getkeycode(struct input_dev *dev,
+			 struct input_keymap_entry *ke)
+{
+	struct infrared		*ir = input_get_drvdata(dev);
+	int			rc;
+
+	if (ke->flags & INPUT_KEYMAP_BY_INDEX) {
+		size_t		addr;
+		size_t		data;
+
+		rc = ir_keymap_find_by_index(ir->key_maps,
+					     ARRAY_SIZE(ir->key_maps),
+					     ke->index,
+					     &addr, &data);
+
+
+		if (!rc) {
+			unsigned int	v = data;
+
+			ke->keycode = ir->key_maps[addr]->keys[data];
+			ke->len = sizeof v;
+			memcpy(ke->scancode, &v, sizeof v);
+		}
+	} else {
+		unsigned int	scancode = ir_ke_scancode(ke);
+		rc = ir_scancode_to_keycode(ir, scancode, ke);
+	}
+
+	return rc;
+}
 
 /* register with input layer */
 static void ir_register_keys(struct infrared *ir)
 {
-	int i;
-
 	set_bit(EV_KEY, ir->input_dev->evbit);
 	set_bit(EV_REP, ir->input_dev->evbit);
 	set_bit(EV_MSC, ir->input_dev->evbit);
@@ -154,16 +372,8 @@ static void ir_register_keys(struct infrared *ir)
 
 	memset(ir->input_dev->keybit, 0, sizeof(ir->input_dev->keybit));
 
-	for (i = 0; i < ARRAY_SIZE(ir->key_map); i++) {
-		if (ir->key_map[i] > KEY_MAX)
-			ir->key_map[i] = 0;
-		else if (ir->key_map[i] > KEY_RESERVED)
-			set_bit(ir->key_map[i], ir->input_dev->keybit);
-	}
-
-	ir->input_dev->keycode = ir->key_map;
-	ir->input_dev->keycodesize = sizeof(ir->key_map[0]);
-	ir->input_dev->keycodemax = ARRAY_SIZE(ir->key_map);
+	ir->input_dev->setkeycode = ir_setkeycode;
+	ir->input_dev->getkeycode = ir_getkeycode;
 }
 
 
@@ -194,7 +404,6 @@ int saa716x_ir_init(struct saa716x_dev *saa716x)
 	struct input_dev *input_dev;
 	struct infrared *ir;
 	int rc;
-	int i;
 
 	if (!saa716x)
 		return -ENOMEM;
@@ -225,6 +434,7 @@ int saa716x_ir_init(struct saa716x_dev *saa716x)
 #else
 	input_dev->cdev.dev = &saa716x->pdev->dev;
 #endif
+	input_set_drvdata(input_dev, ir);
 	rc = input_register_device(input_dev);
 	if (rc)
 		goto err;
@@ -232,8 +442,6 @@ int saa716x_ir_init(struct saa716x_dev *saa716x)
 	/* TODO: fix setup/keymap */
 	ir->protocol = IR_RC5;
 	ir->device_mask = 0xffffffff;
-	for (i = 0; i < ARRAY_SIZE(ir->key_map); i++)
-		ir->key_map[i] = i+1;
 	ir_register_keys(ir);
 
 	/* override repeat timer */
