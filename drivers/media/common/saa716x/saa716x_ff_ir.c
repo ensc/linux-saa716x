@@ -102,7 +102,7 @@ static void ir_emit_key(unsigned long parm)
 
 	/* extract device address and data */
 	if (ircom & 0x80000000) { /* CEC remote command */
-		addr = 0;
+		addr = 0x20;
 		data = ircom & 0x7F;
 		toggle = 0;
 	} else {
