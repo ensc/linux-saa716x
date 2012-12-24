@@ -65,27 +65,18 @@ MODULE_PARM_DESC(int_count_enable, "enable counting of interrupts");
 
 #define DRIVER_NAME	"SAA716x FF"
 
-static int saa716x_ff_fpga_init(struct saa716x_dev *saa716x)
+static int saa716x_ff_fpga_init(struct saa716x_dev *saa716x,
+				struct firmware const *fw)
 {
 	struct sti7109_dev *sti7109 = saa716x->priv;
 	int fpgaInit;
 	int fpgaDone;
 	int rounds;
-	int ret;
-	const struct firmware *fw;
 
-	/* request the FPGA firmware, this will block until someone uploads it */
-	ret = request_firmware(&fw, "dvb-ttpremium-fpga-01.fw", &saa716x->pdev->dev);
-	if (ret) {
-		if (ret == -ENOENT) {
-			printk(KERN_ERR "dvb-ttpremium: could not load FPGA firmware,"
-			       " file not found: dvb-ttpremium-fpga-01.fw\n");
-			printk(KERN_ERR "dvb-ttpremium: usually this should be in "
-			       "/usr/lib/hotplug/firmware or /lib/firmware\n");
-		} else
-			printk(KERN_ERR "dvb-ttpremium: cannot request firmware"
-			       " (error %i)\n", ret);
-		return -EINVAL;
+	if (!fw) {
+		dev_err(&saa716x->pdev->dev,
+			"could not load FPGA firmware dvb-ttpremium-fpga-01.fw\n");
+		return -ENOENT;
 	}
 
 	/* set FPGA PROGRAMN high */
@@ -138,7 +129,6 @@ static int saa716x_ff_fpga_init(struct saa716x_dev *saa716x)
 
 	return 0;
 }
-MODULE_FIRMWARE("dvb-ttpremium-fpga-01.fw");
 
 static int saa716x_ff_st7109_init(struct saa716x_dev *saa716x)
 {
@@ -706,16 +696,14 @@ static int saa716x_ff_video_init(struct saa716x_dev *saa716x)
 	return 0;
 }
 
+static void saa716x_late_probe(struct firmware const *fw, void *context);
 static int __devinit saa716x_ff_pci_probe(struct pci_dev *pdev, const struct pci_device_id *pci_id)
 {
 	struct saa716x_dev *saa716x;
 	struct sti7109_dev *sti7109;
 	int err = 0;
-	u32 value;
-	unsigned long timeout;
-	u32 fw_version;
 
-	saa716x = kzalloc(sizeof (struct saa716x_dev), GFP_KERNEL);
+	saa716x = devm_kzalloc(&pdev->dev, sizeof *saa716x, GFP_KERNEL);
 	if (saa716x == NULL) {
 		printk(KERN_ERR "saa716x_budget_pci_probe ERROR: out of memory\n");
 		err = -ENOMEM;
@@ -730,13 +718,13 @@ static int __devinit saa716x_ff_pci_probe(struct pci_dev *pdev, const struct pci
 	err = saa716x_pci_init(saa716x);
 	if (err) {
 		dprintk(SAA716x_ERROR, 1, "SAA716x PCI Initialization failed");
-		goto fail1;
+		goto fail0;
 	}
 
 	err = saa716x_cgu_init(saa716x);
 	if (err) {
 		dprintk(SAA716x_ERROR, 1, "SAA716x CGU Init failed");
-		goto fail1;
+		goto fail0;
 	}
 
 	err = saa716x_core_boot(saa716x);
@@ -773,7 +761,7 @@ static int __devinit saa716x_ff_pci_probe(struct pci_dev *pdev, const struct pci
 	saa716x_gpio_init(saa716x);
 
 	/* prepare the sti7109 device struct */
-	sti7109 = kzalloc(sizeof(struct sti7109_dev), GFP_KERNEL);
+	sti7109 = devm_kzalloc(&pdev->dev, sizeof *sti7109, GFP_KERNEL);
 	if (!sti7109) {
 		dprintk(SAA716x_ERROR, 1, "SAA716x: out of memory");
 		goto fail3;
@@ -783,7 +771,7 @@ static int __devinit saa716x_ff_pci_probe(struct pci_dev *pdev, const struct pci
 
 	sti7109->iobuf = vmalloc(TSOUT_LEN + TSBUF_LEN + MAX_DATA_LEN);
 	if (!sti7109->iobuf)
-		goto fail4;
+		goto fail3;
 
 	sti7109_cmd_init(sti7109);
 
@@ -814,9 +802,47 @@ static int __devinit saa716x_ff_pci_probe(struct pci_dev *pdev, const struct pci
 	saa716x_gpio_write(saa716x, TT_PREMIUM_GPIO_POWER_ENABLE, 1);
 	msleep(100);
 
-	err = saa716x_ff_fpga_init(saa716x);
+	err = request_firmware_nowait(THIS_MODULE, FW_ACTION_HOTPLUG,
+				      "dvb-ttpremium-fpga-01.fw",
+				      &saa716x->pdev->dev, GFP_KERNEL, saa716x,
+				      saa716x_late_probe);
 	if (err) {
-		dprintk(SAA716x_ERROR, 1, "SAA716x FF FPGA Initialization failed");
+		dev_err(&saa716x->pdev->dev,
+			"dvb-ttpremium: cannot request firmware (error %i)\n",
+			err);
+		goto fail5;
+	}
+
+	return 0;
+
+fail5:
+	SAA716x_EPWR(MSI, MSI_INT_ENA_CLR_H, MSI_INT_EXTINT_0);
+
+	/* disable board power */
+	saa716x_gpio_write(saa716x, TT_PREMIUM_GPIO_POWER_ENABLE, 0);
+
+	vfree(sti7109->iobuf);
+fail3:
+	saa716x_i2c_exit(saa716x);
+fail2:
+	saa716x_pci_exit(saa716x);
+fail0:
+	return err;
+}
+MODULE_FIRMWARE("dvb-ttpremium-fpga-01.fw");
+
+static void saa716x_late_probe(struct firmware const *fw, void *context)
+{
+	struct saa716x_dev *saa716x = context;
+	struct sti7109_dev *sti7109 = saa716x->priv;
+	int err;
+	u32 value;
+	u32 fw_version;
+	unsigned long timeout;
+
+	err = saa716x_ff_fpga_init(saa716x, fw);
+	if (err) {
+		dprintk(SAA716x_ERROR, 1, "Late SAA716x FF FPGA Initialization failed");
 		goto fail5;
 	}
 
@@ -915,7 +941,7 @@ static int __devinit saa716x_ff_pci_probe(struct pci_dev *pdev, const struct pci
 	if (err)
 		goto fail9;
 
-	return 0;
+	return;
 
 fail9:
 	saa716x_ff_osd_exit(saa716x);
@@ -932,16 +958,13 @@ fail5:
 	saa716x_gpio_write(saa716x, TT_PREMIUM_GPIO_POWER_ENABLE, 0);
 
 	vfree(sti7109->iobuf);
-fail4:
-	kfree(sti7109);
-fail3:
+
+	saa716x->priv = NULL;
+
 	saa716x_i2c_exit(saa716x);
-fail2:
 	saa716x_pci_exit(saa716x);
-fail1:
-	kfree(saa716x);
-fail0:
-	return err;
+
+	put_device(&saa716x->pdev->dev);
 }
 
 static void __devexit saa716x_ff_pci_remove(struct pci_dev *pdev)
@@ -967,11 +990,9 @@ static void __devexit saa716x_ff_pci_remove(struct pci_dev *pdev)
 	vfree(sti7109->iobuf);
 
 	saa716x->priv = NULL;
-	kfree(sti7109);
 
 	saa716x_i2c_exit(saa716x);
 	saa716x_pci_exit(saa716x);
-	kfree(saa716x);
 }
 
 static void demux_worker(unsigned long data)
@@ -1520,31 +1541,7 @@ static struct pci_driver saa716x_ff_pci_driver = {
 	.remove			= saa716x_ff_pci_remove,
 };
 
-static void _saa716x_ff_init(struct work_struct *work)
-{
-	int	rc;
-
-	rc = pci_register_driver(&saa716x_ff_pci_driver);
-	if (rc)
-		printk(KERN_ERR "%s: failed to register driver: %d\n",
-		       __func__, rc);
-}
-
-static DECLARE_WORK(saa716x_ff_driver_work, _saa716x_ff_init);
-
-static int __init saa716x_ff_init(void)
-{
-	return schedule_work(&saa716x_ff_driver_work);
-}
-
-static void __exit saa716x_ff_exit(void)
-{
-	cancel_work_sync(&saa716x_ff_driver_work);
-	return pci_unregister_driver(&saa716x_ff_pci_driver);
-}
-
-module_init(saa716x_ff_init);
-module_exit(saa716x_ff_exit);
+module_pci_driver(saa716x_ff_pci_driver);
 
 MODULE_DESCRIPTION("SAA716x FF driver");
 MODULE_AUTHOR("Manu Abraham");
