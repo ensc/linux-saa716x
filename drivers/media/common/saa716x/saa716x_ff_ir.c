@@ -40,7 +40,7 @@ struct infrared {
 	struct timer_list	keyup_timer;
 	struct tasklet_struct	tasklet;
 	u32			command;
-	u32			device_mask;
+	unsigned long		device_mask[BITS_TO_LONGS(0x20)];
 	u8			protocol;
 	u16			last_key;
 	u16			last_toggle;
@@ -134,8 +134,11 @@ static int ir_scancode_to_keycode(struct infrared *ir, unsigned int scancode,
 		return -EINVAL;
 	}
 
-	if (!(ir->device_mask & (1 << addr)))
+	if (!test_bit(addr, ir->device_mask)) {
+		dev_dbg(&ir->input_dev->dev,
+			"device of scancode %08x masked out\n", scancode);
 		return 0;
+	}
 
 	map = ir->key_maps[addr];
 
@@ -178,7 +181,7 @@ static void ir_emit_key(unsigned long parm)
 
 	/* extract device address and data */
 	if (ircom & 0x80000000) { /* CEC remote command */
-		addr = 0;
+		addr = 0x20;
 		data = ircom & 0x7F;
 		toggle = 0;
 	} else {
@@ -441,7 +444,7 @@ int saa716x_ir_init(struct saa716x_dev *saa716x)
 
 	/* TODO: fix setup/keymap */
 	ir->protocol = IR_RC5;
-	ir->device_mask = 0xffffffff;
+	memset(ir->device_mask, 0xff, sizeof ir->device_mask);
 	ir_register_keys(ir);
 
 	/* override repeat timer */
