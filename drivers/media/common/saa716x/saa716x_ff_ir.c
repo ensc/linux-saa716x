@@ -211,35 +211,41 @@ static void ir_emit_key(unsigned long parm)
 		"%s: code %08x -> addr %i data 0x%02x -> keycode %i\n",
 		__func__, ircom, addr, data, keycode);
 
-	/* check device address */
 	send_scancode = true;
+	/* \todo: there is a race with the 'ir->delay_timer_finished' flag;
+	 * when the repeat timer is running and this interrupt routine is
+	 * called, the flag is reset by this function but set immediately by
+	 * the timer causing a too fast repeat event */
 	if (del_timer(&ir->keyup_timer) == 0) {
-		/* no timer active yet; reset variables */
-		ir->delay_timer_finished = false;
+		/* no timer active yet (e.g. not previously pressed key which
+		 * must be handled by sending a release or repeat event; just
+		 * reset variables */
 	} else if (ir->last_key != keycode || toggle != ir->last_toggle) {
 		/* another key was pressed; signal the release event of the
 		 * previos one */
-		ir->delay_timer_finished = false;
 		input_event(ir->input_dev, EV_KEY, ir->last_key, 0);
 	} else if (ir->delay_timer_finished) {
 		/* repeat last key event */
 		input_event(ir->input_dev, EV_KEY, keycode, 2);
 		send_scancode = false;
 	} else {
-		/* repeat timer is still running; do nothing */
-		return;
+		/* repeat timer was running but no action was required; do
+		 * nothing */
+		send_scancode = false;
 	}
 
 	if (send_scancode) {
 		input_event(ir->input_dev, EV_MSC, MSC_RAW,  ircom);
 		input_event(ir->input_dev, EV_MSC, MSC_SCAN, scancode);
 
-		if (keycode > 0)
+		if (keycode > 0) {
+			ir->delay_timer_finished = false;
 			input_event(ir->input_dev, EV_KEY, keycode, 1);
-		else
+		} else {
 			dev_info(&ir->input_dev->dev,
 				 "unknown key %04x (scancode %08x)\n",
 				 ircom, scancode);
+		}
 	}
 
 	input_sync(ir->input_dev);
