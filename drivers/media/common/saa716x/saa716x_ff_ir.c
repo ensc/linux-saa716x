@@ -70,19 +70,34 @@ static int ir_scancode_to_keycode(struct infrared *ir, unsigned int scancode)
 	unsigned int		data = scancode & 0xffff;
 	struct ir_keymap const	*map;
 
-	if (addr >= ARRAY_SIZE(ir->key_maps))
+	if (addr >= ARRAY_SIZE(ir->key_maps)) {
+		dev_warn(&ir->input_dev->dev,
+			 "address in scancode %08x out of range\n", scancode);
 		return -EINVAL;
+	}
 
-	if (!test_bit(addr, ir->device_mask))
+	if (!test_bit(addr, ir->device_mask)) {
+		dev_dbg(&ir->input_dev->dev,
+			"device of scancode %08x masked out\n", scancode);
 		return 0;
+	}
 
 	map = ir->key_maps[addr];
 
-	if (data >= ARRAY_SIZE(map->keys))
+	if (data >= ARRAY_SIZE(map->keys)) {
+		dev_warn(&ir->input_dev->dev,
+			 "data in scancode %08x out of range\n", scancode);
 		return -EINVAL;
+	}
 
-	if (map == NULL)
+	if (map == NULL) {
+		dev_warn(&ir->input_dev->dev,
+			 "no keymap for scancode %08x\n", scancode);
 		return 0;
+	}
+
+	dev_dbg(&ir->input_dev->dev, "map[%u]->keys[%u] => %04x\n",
+		addr, data, map->keys[data]);
 
 	return map->keys[data];
 }
@@ -192,15 +207,24 @@ static int ir_setkeycode(struct input_dev *dev,
 	struct ir_keymap	*map;
 	unsigned int		old_code;
 
-	if (addr >= ARRAY_SIZE(ir->key_maps))
+	if (addr >= ARRAY_SIZE(ir->key_maps)) {
+		dev_warn(&ir->input_dev->dev,
+			 "address in scancode %08x out of range\n", scancode);
 		return -EINVAL;
+	}
 
 	map = ir->key_maps[addr];
 
-	if (data >= ARRAY_SIZE(map->keys))
+	if (data >= ARRAY_SIZE(map->keys)) {
+		dev_warn(&ir->input_dev->dev,
+			 "data in scancode %08x out of range\n", scancode);
 		return -EINVAL;
+	}
 
 	if (map == NULL) {
+		dev_dbg(&ir->input_dev->dev,
+			"allocating map for scancode %08x\n", scancode);
+
 		/* we have to use GFP_ATOMIC here because setkeycode is called
 		 * with a hold spinlock */
 		map = devm_kzalloc(&dev->dev, sizeof *map, GFP_ATOMIC);
@@ -214,6 +238,9 @@ static int ir_setkeycode(struct input_dev *dev,
 
 	if (old_keycode)
 		*old_keycode = old_code;
+
+	dev_dbg(&ir->input_dev->dev, "map[%u]->keys[%u] <= %04x\n",
+		addr, data, ke->keycode);
 
 	map->keys[data] = ke->keycode;
 
