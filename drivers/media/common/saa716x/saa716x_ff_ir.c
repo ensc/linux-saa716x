@@ -64,7 +64,66 @@ static void ir_emit_keyup(unsigned long parm)
 	input_sync(ir->input_dev);
 }
 
-static int ir_scancode_to_keycode(struct infrared *ir, unsigned int scancode)
+static unsigned int ir_keymap_calculate_index(struct ir_keymap /*const*/ *maps[],
+					      size_t addr, size_t data)
+{
+	unsigned int	res = 0;
+	size_t		i;
+
+	BUG_ON(data >= ARRAY_SIZE(maps[0]->keys));
+	BUG_ON(maps[addr] == NULL);
+
+	for (i = 0; i+1 < addr; ++i) {
+		size_t		j;
+
+		if (maps[i] == NULL)
+			continue;
+
+		for (j = 0; j < ARRAY_SIZE(maps[i]->keys); ++j) {
+			if (maps[i]->keys[j] != 0)
+				++res;
+		}
+	}
+
+	for (i = 0; i <= data; ++i) {
+		if (maps[addr]->keys[i] != 0 || i == data)
+			++res;
+	}
+
+	return res;
+}
+
+static int ir_keymap_find_by_index(struct ir_keymap /*const*/ *maps[],
+				   size_t num_maps, unsigned int idx,
+				   size_t *addr, size_t *data)
+{
+	size_t		i;
+
+	++idx;
+	for (i = 0; i < num_maps && idx > 0; ++i) {
+		size_t	j;
+
+		if (maps[i] == NULL)
+			continue;
+
+		for (j = 0; j < ARRAY_SIZE(maps[i]->keys) && idx > 0; ++j) {
+			if (maps[i]->keys[j] != 0)
+				--idx;
+		}
+
+		if (idx == 0) {
+			*addr = i;
+			*data = j;
+			break;
+		}
+	}
+
+	return (idx == 0) ? 0 : -ENOENT;
+}
+
+
+static int ir_scancode_to_keycode(struct infrared *ir, unsigned int scancode,
+				  struct input_keymap_entry *ke)
 {
 	unsigned int		addr = scancode >> 16;
 	unsigned int		data = scancode & 0xffff;
@@ -98,6 +157,12 @@ static int ir_scancode_to_keycode(struct infrared *ir, unsigned int scancode)
 
 	dev_dbg(&ir->input_dev->dev, "map[%u]->keys[%u] => %04x\n",
 		addr, data, map->keys[data]);
+
+	if (ke) {
+		ke->keycode = map->keys[data];
+		ke->len = sizeof scancode;
+		ke->index = ir_keymap_calculate_index(ir->key_maps, addr, data);
+	}
 
 	return map->keys[data];
 }
@@ -140,7 +205,7 @@ static void ir_emit_key(unsigned long parm)
 	}
 
 	scancode = (addr << 16) | data;
-	keycode = ir_scancode_to_keycode(ir, scancode);
+	keycode = ir_scancode_to_keycode(ir, scancode, NULL);
 
 	dprintk(SAA716x_DEBUG, 0,
 		"%s: code %08x -> addr %i data 0x%02x -> keycode %i\n",
@@ -192,6 +257,12 @@ static unsigned int ir_ke_scancode(struct input_keymap_entry const *ke)
 {
 	unsigned int	v = 0;
 
+	if (ke->len != sizeof v) {
+		printk(KERN_WARNING "%s: bad length %u of scancode\n",
+		       __func__, ke->len);
+		return ~0u;
+	}
+
 	memcpy(&v, &ke->scancode, sizeof v);
 	return v;
 }
@@ -206,6 +277,12 @@ static int ir_setkeycode(struct input_dev *dev,
 	unsigned int		data = scancode & 0xffff;
 	struct ir_keymap	*map;
 	unsigned int		old_code;
+
+	if (ke->flags & INPUT_KEYMAP_BY_INDEX) {
+		dev_warn(&ir->input_dev->dev,
+			 "setkeycode by index not supported\n");
+		return -EINVAL;
+	}
 
 	if (addr >= ARRAY_SIZE(ir->key_maps)) {
 		dev_warn(&ir->input_dev->dev,
@@ -254,9 +331,31 @@ static int ir_getkeycode(struct input_dev *dev,
 			 struct input_keymap_entry *ke)
 {
 	struct infrared		*ir = input_get_drvdata(dev);
-	unsigned int		scancode = ir_ke_scancode(ke);
+	int			rc;
 
-	return ir_scancode_to_keycode(ir, scancode);
+	if (ke->flags & INPUT_KEYMAP_BY_INDEX) {
+		size_t		addr;
+		size_t		data;
+
+		rc = ir_keymap_find_by_index(ir->key_maps,
+					     ARRAY_SIZE(ir->key_maps),
+					     ke->index,
+					     &addr, &data);
+
+
+		if (!rc) {
+			unsigned int	v = data;
+
+			ke->keycode = ir->key_maps[addr]->keys[data];
+			ke->len = sizeof v;
+			memcpy(ke->scancode, &v, sizeof v);
+		}
+	} else {
+		unsigned int	scancode = ir_ke_scancode(ke);
+		rc = ir_scancode_to_keycode(ir, scancode, ke);
+	}
+
+	return rc;
 }
 
 /* register with input layer */
