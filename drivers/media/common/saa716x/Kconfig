@@ -8,6 +8,12 @@ if SAA716X_SUPPORT
 config SAA716X_CORE
 	tristate "SAA7160/1/2 PCI Express bridge based devices"
 	depends on PCI && I2C
+	select DVB_STV090x        if MEDIA_SUBDRV_AUTOSELECT
+	select DVB_STV6110x       if MEDIA_SUBDRV_AUTOSELECT
+	select DVB_TDA10086       if MEDIA_SUBDRV_AUTOSELECT
+	select DVB_TDA8261        if MEDIA_SUBDRV_AUTOSELECT
+	select DVB_ISL6423        if MEDIA_SUBDRV_AUTOSELECT
+	select MEDIA_TUNER_MT2060 if MEDIA_SUBDRV_AUTOSELECT
 
 	help
 	  Support for PCI cards based on the SAA7160/1/2 PCI Express bridge.
