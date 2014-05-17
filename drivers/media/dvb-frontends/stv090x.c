@@ -3549,6 +3549,7 @@ static int stv090x_read_status(struct dvb_frontend *fe, enum fe_status *status)
 	return 0;
 }
 
+#if 0
 static int stv090x_read_per(struct dvb_frontend *fe, u32 *per)
 {
 	struct stv090x_state *state = fe->demodulator_priv;
@@ -3598,6 +3599,27 @@ static int stv090x_read_per(struct dvb_frontend *fe, u32 *per)
 err:
 	dprintk(FE_ERROR, 1, "I/O error");
 	return -1;
+}
+#endif
+
+static int stv090x_read_ber(struct dvb_frontend *fe, u32 *ber)
+{
+	struct stv090x_state *state = fe->demodulator_priv;
+	u32 reg, h, m, l;
+
+	/* Counter 1: S1: 0x75 BER, S2: 0x67 PER */
+	reg = STV090x_READ_DEMOD(state, ERRCNT12);
+	h = STV090x_GETFIELD_Px(reg, ERR_CNT12_FIELD);
+
+	reg = STV090x_READ_DEMOD(state, ERRCNT11);
+	m = STV090x_GETFIELD_Px(reg, ERR_CNT11_FIELD);
+
+	reg = STV090x_READ_DEMOD(state, ERRCNT10);
+	l = STV090x_GETFIELD_Px(reg, ERR_CNT10_FIELD);
+
+	*ber = ((h << 16) | (m << 8) | l);
+
+	return 0;
 }
 
 static int stv090x_table_lookup(const struct stv090x_tab *tab, int max, int val)
@@ -3715,6 +3737,26 @@ static int stv090x_read_cnr(struct dvb_frontend *fe, u16 *cnr)
 	default:
 		break;
 	}
+
+	return 0;
+}
+
+static int stv090x_read_ucblocks(struct dvb_frontend *fe, u32 *ucblocks)
+{
+	struct stv090x_state *state = fe->demodulator_priv;
+	u32 reg, h, m, l;
+
+	/* Counter 2: 0xc1 TS error count */
+	reg = STV090x_READ_DEMOD(state, ERRCNT22);
+	h = STV090x_GETFIELD_Px(reg, ERR_CNT2_FIELD);
+
+	reg = STV090x_READ_DEMOD(state, ERRCNT21);
+	m = STV090x_GETFIELD_Px(reg, ERR_CNT21_FIELD);
+
+	reg = STV090x_READ_DEMOD(state, ERRCNT20);
+	l = STV090x_GETFIELD_Px(reg, ERR_CNT20_FIELD);
+
+	*ucblocks = ((h << 16) | (m << 8) | l);
 
 	return 0;
 }
@@ -4902,9 +4944,10 @@ static struct dvb_frontend_ops stv090x_ops = {
 
 	.search				= stv090x_search,
 	.read_status			= stv090x_read_status,
-	.read_ber			= stv090x_read_per,
+	.read_ber			= stv090x_read_ber,
 	.read_signal_strength		= stv090x_read_signal_strength,
 	.read_snr			= stv090x_read_cnr,
+	.read_ucblocks			= stv090x_read_ucblocks,
 };
 
 
